@@ -1,0 +1,26 @@
+{
+  "models": {
+	"embedder": "C:/AI/models/bge-m3",
+	"llm": "C:/AI/models/qwen2.5-7b-instruct-q4_k_m/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf"
+  },
+  "kobold": {
+    "exe": "C:/AI/kobold/koboldcpp.exe",    
+    "host": "127.0.0.1",
+    "port": 5001
+  },
+  "uvicorn": {
+    "host": "127.0.0.1",
+    "port": 8000
+  },
+  "streamlit": {
+    "host": "0.0.0.0",
+    "port": 8501	  
+  },
+  "chroma": {
+    "path": "chroma_db"
+  },
+  "rag": {
+    "chunks_dir": "chunks",
+	"source_dir": "sources"
+  }
+}

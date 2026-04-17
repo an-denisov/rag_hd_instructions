@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+
+# Virtual environments
+venv/
+env/
+chunks/
+sources/
+
+# Logs
+*.log
+
+# Databases / cache
+chroma_db/
+*.sqlite3
+*.db
+
+# Model files
+models/
+*.gguf
+*.pt
+*.bin
+
+# Streamlit / other temp
+.streamlit/
+*.cache
+
+# OS files
+.DS_Store
+Thumbs.db
