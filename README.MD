@@ -103,7 +103,7 @@ python scripts/tests/check_env.py
 
 В папку:
 
-rag.source_dir
+rag.source_dir (см. конфиг)
 
 Пример:
 sources/
