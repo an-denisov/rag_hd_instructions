@@ -46,7 +46,7 @@ Write-Host $commandFastApi
 Start-Process powershell -ArgumentList "-NoExit", "-Command", $commandFastApi
 
 Write-Host "Starting Streamlit UI..."
-$commandStreamlit = "python -m streamlit run $root/scripts/ui/ui.py --server.address=$($streamlit.host) --server.port=$($streamlit.port)"
+$commandStreamlit = "python -m streamlit run $root/scripts/ui/ui.py --server.address=$($streamlit.host) --server.port=$($streamlit.port) --server.headless=true --browser.gatherUsageStats=false"
 Write-Host $commandStreamlit
 Start-Process powershell -ArgumentList "-NoExit", "-Command", $commandStreamlit
 

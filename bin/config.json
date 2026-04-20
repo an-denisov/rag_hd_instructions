@@ -1,7 +1,7 @@
 {
   "models": {
-	"embedder": "C:/AI/models/bge-m3",
-	"llm": "C:/AI/models/qwen2.5-7b-instruct-q4_k_m/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf"
+	  "embedder": "C:/AI/models/bge-m3",
+	  "llm": "C:/AI/models/qwen2.5-7b-instruct-q4_k_m/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf"
   },
   "kobold": {
     "exe": "C:/AI/kobold/koboldcpp.exe",    

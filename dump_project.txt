@@ -1,0 +1,675 @@
+
+===== C:\AI\rag\bin\start.ps1 =====
+
+# start.ps1 в bin/
+$originalDir = Get-Location
+
+$bin = Split-Path -Parent $MyInvocation.MyCommand.Definition
+
+# корневая папка проекта (один уровень выше bin)
+$root = Split-Path $bin -Parent
+Set-Location $root
+
+function Get-Config {
+    param(
+        [string]$ConfigPath = "$bin\config.json"
+    )
+
+    if (-Not (Test-Path $ConfigPath)) {
+        throw "Config file not found: $ConfigPath"
+    }
+
+    $json = Get-Content $ConfigPath -Raw
+    return $json | ConvertFrom-Json
+}
+
+$config = Get-Config
+$llmPath = $config.models.llm
+$kobold = $config.kobold
+$uvicorn = $config.uvicorn
+$streamlit = $config.streamlit
+
+$koboldExe = $kobold.exe
+
+$koboldArgs = @(
+    "--port", $kobold.port,
+    "--host", $kobold.host,
+    "`"$llmPath`""
+)
+
+Write-Host "Starting KoboldCpp..."
+Start-Process -FilePath $koboldExe -ArgumentList $koboldArgs
+
+Write-Host "Sleeping 20 seconds to let KoboldCpp start..."
+Start-Sleep -Seconds 20
+
+Write-Host "Starting FastAPI..."
+$commandFastApi = "uvicorn scripts.server.server:app --host $($uvicorn.host) --port $($uvicorn.port)"
+Write-Host $commandFastApi
+Start-Process powershell -ArgumentList "-NoExit", "-Command", $commandFastApi
+
+Write-Host "Starting Streamlit UI..."
+$commandStreamlit = "python -m streamlit run $root/scripts/ui/ui.py --server.address=$($streamlit.host) --server.port=$($streamlit.port)"
+Write-Host $commandStreamlit
+Start-Process powershell -ArgumentList "-NoExit", "-Command", $commandStreamlit
+
+Write-Host "All processes started."
+Write-Host "KoboldCpp port: $($kobold.port)"
+Write-Host "FastAPI URL:  http://$($uvicorn.host):$($uvicorn.port)"
+Write-Host "Streamlit URL: http://$($streamlit.host):$($streamlit.port)"
+
+Set-Location $originalDir
+
+===== C:\AI\rag\scripts\build\add_chunks.py =====
+
+import chromadb
+from sentence_transformers import SentenceTransformer
+import glob
+import os
+import json
+from pathlib import Path
+
+# ---------- Чтение конфига ----------
+CONFIG_PATH = Path(__file__).parent.parent.parent / "bin" / "config.json"
+with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+    config = json.load(f)
+
+CHUNK_DIR = Path(__file__).parent.parent.parent / Path(config["rag"]["chunks_dir"])
+CHROMA_PATH = Path(__file__).parent.parent.parent / config["chroma"]["path"] 
+EMBEDDER_PATH = Path(config["models"]["embedder"])
+
+# ---------- Создание клиента ----------
+client = chromadb.PersistentClient(path=str(CHROMA_PATH))
+
+collection = client.get_or_create_collection(
+    name="chunks",
+    metadata={"hnsw:space": "cosine"}
+)
+
+# ---------- Загрузка модели ----------
+model = SentenceTransformer(str(EMBEDDER_PATH))
+
+# ---------- Обработка файлов ----------
+files = glob.glob(str(CHUNK_DIR / "*.md"))
+
+print(f""" Обработка каталога {CHUNK_DIR} :""")
+for filepath in files:
+    with open(filepath, "r", encoding="utf-8") as f:
+        text = f.read().strip()
+
+    filename = os.path.basename(filepath)
+    doc_id = filename  # один ID = один файл
+
+    emb = model.encode(text).tolist()
+
+    collection.upsert(
+        ids=[doc_id],
+        embeddings=[emb],
+        documents=[text],
+        metadatas=[{"filename": filename}]
+    )
+
+    print("Добавлен:", filename)
+
+print("Готово.")
+
+===== C:\AI\rag\scripts\build\build_chunks.py =====
+
+import os
+import re
+import json
+from pathlib import Path
+
+# ---------- Чтение конфига ----------
+CONFIG_PATH = Path(__file__).parent.parent.parent / "bin" / "config.json"
+with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+    config = json.load(f)
+
+CHUNK_DIR = Path(__file__).parent.parent.parent / Path(config["rag"]["chunks_dir"])
+SOURCE_DIR = Path(__file__).parent.parent.parent / config["rag"]["source_dir"] 
+
+HEADER_RE = re.compile(r"^#(.+)$", re.MULTILINE)
+
+def slugify(text):
+    text = text.strip().lower()
+    text = re.sub(r"[^a-zа-я0-9]+", "_", text)
+    return text.strip("_")
+
+def split_into_chunks(content):
+    chunks = []
+    current_title = None
+    current_lines = []
+
+    for line in content.splitlines():
+        header_match = HEADER_RE.match(line)
+        if header_match:
+            if current_title and current_lines:
+                chunks.append((current_title, "\n".join(current_lines).strip()))
+                current_lines = []
+            current_title = header_match.group(1).strip()  # без # и лишних пробелов
+        else:
+            if current_title:
+                current_lines.append(line)
+
+    if current_title and current_lines:
+        chunks.append((current_title, "\n".join(current_lines).strip()))
+
+    return chunks
+
+def process_file(path):
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    chunks = split_into_chunks(content)
+    print(f"{os.path.basename(path)} → найдено чанков: {len(chunks)}")
+
+    for title, text in chunks:
+        slug = slugify(title)
+        filename = f"{slug}.md"
+        file_path = os.path.join(CHUNK_DIR, filename)
+
+        with open(file_path, "w", encoding="utf-8") as out:
+            out.write(f"{title}\n\n{text}")
+
+        print("  ✔ сохранён:", filename)
+
+def main():
+    if not os.path.exists(CHUNK_DIR):
+        os.makedirs(CHUNK_DIR)
+
+    for f in os.listdir(SOURCE_DIR):
+        if f.endswith(".txt") or f.endswith(".md"):
+            process_file(os.path.join(SOURCE_DIR, f))
+
+if __name__ == "__main__":
+    main()
+
+===== C:\AI\rag\scripts\build\init_chroma.py =====
+
+import chromadb
+from chromadb.config import Settings
+
+client = chromadb.Client(Settings(
+    chroma_db_impl="duckdb+parquet",
+    persist_directory="../chroma_db"
+))
+
+client.get_or_create_collection(
+    name="chunks",
+    metadata={"hnsw:space": "cosine"}
+)
+
+print("OK: коллекция создана")
+
+===== C:\AI\rag\scripts\server\rag_core.py =====
+
+
+# rag_core.py
+import chromadb
+from sentence_transformers import SentenceTransformer
+import requests
+from typing import List, Tuple
+from pathlib import Path
+import json
+
+# ---------- Чтение конфига ----------
+CONFIG_PATH = Path(__file__).parent.parent.parent / "bin" / "config.json"
+with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+    config = json.load(f)
+
+# ---- config ----
+CHROMA_PATH = Path(__file__).parent.parent.parent / config["chroma"]["path"]           # путь к базе Chroma
+COLLECTION_NAME = "chunks"
+KOBOLD_URL = f"http://{config['kobold']['host']}:{config['kobold']['port']}/api/v1/generate"
+
+# ---- load models ----
+embedder_path = config["models"]["embedder"]
+embedder = SentenceTransformer(embedder_path)
+
+client = chromadb.PersistentClient(path=CHROMA_PATH)
+collection = client.get_collection(COLLECTION_NAME)
+
+History = List[Tuple[str, str]]
+
+
+# =============== LOW LEVEL =================
+
+def rewrite_question(question: str, history: History) -> str:
+    conv_parts = []
+    for role, text in history[-6:]:
+        conv_parts.append(f"<|im_start|>{role}\n{text}\n<|im_end|>")
+
+    conv_block = "\n".join(conv_parts)
+
+    prompt = f"""<|im_start|>system
+Перепиши последний вопрос пользователя так, чтобы он был понятен без контекста диалога.
+Обязательные правила:
+- Сохрани точный смысл.
+- Если запрос не на русском, то переведи его на русский
+- Если в последнем вопросе есть местоимения, ты ОБЯЗАН заменить их на конкретные сущности из диалога
+- Если по диалогу понятно, что речь идёт о системе с конкретным названием, используй именно это название.
+- Если контекст вообще не помогает (вопрос несвязан или просто мат/шутка) — верни вопрос без изменений.
+- Верни только ОДНУ финальную строку-вопрос на русском, без кавычек, без комментариев и пояснений.
+<|im_end|>
+{conv_block}
+<|im_start|>user
+Переформулируй мой последний вопрос так, чтобы он был понятен без контекста диалога.
+
+Мой последний вопрос: {question}
+<|im_end|>
+<|im_start|>assistant
+"""
+
+    payload = {
+        "prompt": prompt,
+        "temperature": 0.1,
+        "top_p": 0.95,
+        "top_k": 40,
+        "repetition_penalty": 1.05,
+        "max_new_tokens": 64,
+        "min_p": 0.02,
+        "stop_sequence": [
+            "<|im_end|>",
+            "<|im_start|>",
+            "<|endoftext|>",
+            "</s>",
+        ],
+        "stream": False,
+    }
+
+    resp = requests.post(KOBOLD_URL, json=payload, timeout=300)
+    resp.raise_for_status()
+    data = resp.json()
+    text = data["results"][0]["text"].strip()
+
+    # Берём только первую строку
+    text = text.splitlines()[0].strip()
+
+    return clean_llm_output(text)
+
+
+def search_chunks(question: str, history: History, top_k=3) -> list[str]:
+    rewritten = rewrite_question(question, history)
+    q_emb = embedder.encode(rewritten).tolist()
+
+    res = collection.query(
+        query_embeddings=[q_emb],
+        n_results=top_k
+    )
+
+    found_docs = res["documents"][0]
+    distances  = res["distances"][0]
+
+    # Фильтруем по distance ≤ 0.66
+    filtered_docs = [
+        f"distance={dist:.4f}  {doc}" 
+        for doc, dist in zip(found_docs, distances) 
+        if dist <= 0.66
+    ]
+
+    if not filtered_docs:
+        filtered_docs = ["Не найдено в базе знаний"]
+
+    print(f"""=== Поиск документов ===
+        Входящий вопрос: 
+        {question}
+        Переписанный вопрос: 
+        {rewritten}
+        Найденные документы:""")
+
+    for i, doc in enumerate(filtered_docs, 1):
+        print(f"{i}. {doc}")
+
+    return filtered_docs
+
+
+def generate_answer(question: str, docs: list[str]) -> str:
+    ctx = "\n\n".join(docs)
+
+    prompt = f"""<|im_start|>system
+Ты — внутренняя справочная система магазина. Отвечай только на основе предоставленных инструкций, кратко. 
+- Если точного ответа нет — честно скажи «Не найдено в базе знаний».
+- Отвечай только на русском языке, если пользователь обращается на русском. 
+- Отвечай только на казахском языке, если пользователь обращается на казахском.
+- Сохрани точный смысл.
+- Отвечай только на основе инструкций ниже.
+- Каждое утверждение в ответе должно напрямую следовать из текста инструкций.
+- Не добавляй новой информации. 
+- Отвечай развернуто.
+<|im_end|>
+<|im_start|>user
+Контекст из базы знаний:
+{ctx}
+
+Вопрос сотрудника: {question}<|im_end|>
+<|im_start|>assistant
+"""
+
+    payload = {
+        "prompt": prompt,
+        "temperature": 0.1,           # почти детерминировано
+        "top_p": 0.95,
+        "top_k": 40,
+        "repetition_penalty": 1.08,
+        "max_new_tokens": 256,
+        "min_p": 0.02,
+        "stop_sequence": [            # KoboldCpp понимает именно stop_sequence
+            "<|im_end|>",
+            "<|endoftext|>",
+            "</s>",
+            "<|im_start|>"
+        ],
+        "stream": False
+    }
+
+    response = requests.post(KOBOLD_URL, json=payload, timeout=300)
+    response.raise_for_status()
+    data = response.json()
+
+    answer = data["results"][0]["text"]
+
+    return clean_llm_output(answer)
+
+
+def verify_answer(question: str, docs: list[str], draft: str) -> str:
+    ctx = "\n\n".join(docs)
+
+    prompt = f"""<|im_start|>system
+Ты — модуль проверки ответов в системе RAG.
+Задача: проверить, насколько черновой ответ ассистента строго основан на инструкциях.
+Правила:
+- Используй ТОЛЬКО текст из инструкций ниже.
+- НЕЛЬЗЯ добавлять новые факты или делать логические догадки.
+- Если часть ответа не подтверждается инструкциями — удали её.
+- Если после удаления неподтверждённых частей не остаётся полезной информации — верни ровно: Не найдено в базе знаний
+- Ответ должен быть по-русски, без ссылок на эти правила, без пояснений, без форматирования и без цитирования промпта.
+<|im_end|>
+<|im_start|>user
+Инструкции (контекст):
+{ctx}
+
+Вопрос сотрудника:
+{question}
+
+Черновой ответ ассистента:
+{draft}
+<|im_end|>
+<|im_start|>assistant
+"""
+
+    payload = {
+        "prompt": prompt,
+        "temperature": 0.0,      # максимально детерминированно
+        "top_p": 1.0,
+        "top_k": 0,
+        "repetition_penalty": 1.0,
+        "max_new_tokens": 256,
+        "min_p": 0.0,
+        "stop_sequence": [
+            "<|im_end|>",
+            "<|im_start|>",
+            "<|endoftext|>",
+            "</s>",
+        ],
+        "stream": False,
+    }
+    
+    resp = requests.post(KOBOLD_URL, json=payload, timeout=300)
+    resp.raise_for_status()
+    data = resp.json()
+    final = data["results"][0]["text"].strip()
+
+    return clean_llm_output(final)
+    
+def clean_llm_output(text: str) -> str:
+    """Обрезает служебные маркеры LLM и лишние строки в начале/конце."""
+    if not text:
+        return ""
+    
+    # Убираем все известные маркеры
+    for marker in ["<|im_start|", "<|im_end|>", "Вопрос сотрудника:", "Контекст из базы"]:
+        pos = text.find(marker)
+        if pos != -1:
+            text = text[:pos]
+
+    # Обрезаем пустые строки по краям
+    text = text.strip()
+    
+    return text    
+
+
+# ================== HIGH LEVEL ===================
+
+def run_rag(question: str, history: History | None = None) -> tuple[str, History]:
+    history = history or []
+
+    docs = search_chunks(question, history)
+    draft = generate_answer(question, docs)
+    final = verify_answer(question, docs, draft)
+
+    new_hist = history + [("user", question), ("assistant", final)]
+    return final, new_hist
+
+===== C:\AI\rag\scripts\server\server.py =====
+
+from fastapi import FastAPI
+from pydantic import BaseModel
+from .rag_core import run_rag
+import threading
+
+app = FastAPI()
+
+# session_id → history
+sessions = {}
+lock = threading.Lock()   # потоки uvicorn — нужны
+
+class AskRequest(BaseModel):
+    session_id: str
+    question: str
+
+class AskResponse(BaseModel):
+    answer: str
+
+
+@app.post("/ask", response_model=AskResponse)
+async def ask(req: AskRequest):
+    session_id = req.session_id
+
+    with lock:
+        history = sessions.get(session_id, [])
+
+    # RAG
+    answer, new_history = run_rag(req.question, history)
+
+    with lock:
+        sessions[session_id] = new_history
+
+    return AskResponse(answer=answer)
+
+===== C:\AI\rag\scripts\tests\check_env.py =====
+
+import importlib
+import sys
+
+modules = [
+    "sentence_transformers",
+    "chromadb",
+    "numpy",
+    "fastapi",
+    "uvicorn",
+    "requests",
+    "pydantic",
+    "streamlit",
+    "hf_xet",
+]
+
+print("Python:", sys.version, "\n")
+
+for m in modules:
+    try:
+        importlib.import_module(m)
+        print(f"[OK]   {m}")
+    except ImportError:
+        print(f"[MISS] {m} — НЕ установлен")
+        print(f"👉 Установить:  pip install {m} --trusted-host pypi.org --trusted-host files.pythonhosted.org")
+
+===== C:\AI\rag\scripts\tests\embed_test.py =====
+
+from sentence_transformers import SentenceTransformer
+
+model = SentenceTransformer("C:/AI/models/bge-m3")
+
+text = """
+Дата В II — Логика возвратного товара.
+Возвратный остаток отображается, если у товара есть основание на возврат.
+Если основания нет — строка не отображается.
+"""
+
+emb = model.encode(text)
+
+print("Размер вектора:", len(emb))
+print("Первые 5 значений:", emb[:5])
+
+===== C:\AI\rag\scripts\tests\query_model.py =====
+
+from rag_core import run_rag
+
+if __name__ == "__main__":
+    print("RAG CLI. exit=выход, reset=сброс\n")
+
+    history = []
+
+    while True:
+        q = input(">>> ").strip()
+
+        if q.lower() in ("exit", "выход", "quit"):
+            break
+
+        if q.lower() in ("reset", "сброс"):
+            history = []
+            print("История очищена.\n")
+            continue
+
+        answer, history = run_rag(q, history)
+
+        print("\n===== ОТВЕТ =====")
+        print(answer)
+        print()
+
+===== C:\AI\rag\scripts\tests\query_test.py =====
+
+from sentence_transformers import SentenceTransformer
+import chromadb
+
+client = chromadb.PersistentClient(path="C:/AI/rag/chroma_db")
+
+collection = client.get_collection("chunks")
+
+print("Документов:", collection.count())
+
+model = SentenceTransformer("BAAI/bge-m3")
+
+query = "Как напечатать ценники?"
+q_emb = model.encode(query).tolist()
+
+res = collection.query(
+    query_embeddings=[q_emb],
+    n_results=3
+)
+
+print(res)
+
+===== C:\AI\rag\scripts\tests\search.py =====
+
+import chromadb
+from sentence_transformers import SentenceTransformer
+
+model = SentenceTransformer("BAAI/bge-m3")
+
+client = chromadb.Client()
+collection = client.get_collection("chunks")
+
+query = input("Введите запрос: ")
+
+emb = model.encode(query).tolist()
+
+res = collection.query(
+    query_embeddings=[emb],
+    n_results=3
+)
+
+for doc, meta in zip(res["documents"][0], res["metadatas"][0]):
+    print("-----")
+    print("Файл:", meta["filename"])
+    print(doc[:300], "...")
+
+===== C:\AI\rag\scripts\ui\ui.py =====
+
+import streamlit as st
+import requests
+import json
+from pathlib import Path
+import uuid
+import logging
+
+logging.basicConfig(level=logging.INFO)
+
+# ---------- Чтение конфига ----------
+CONFIG_PATH = Path(__file__).parent.parent.parent / "bin" / "config.json"
+with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+    config = json.load(f)
+
+API_URL = f"http://{config['uvicorn']['host']}:{config['uvicorn']['port']}/ask"
+
+# ----------- Сессия пользователя -----------
+if "session_id" not in st.session_state:
+    st.session_state.session_id = str(uuid.uuid4())
+
+SESSION_ID = st.session_state.session_id
+
+# ---------- Настройка страницы ----------
+st.set_page_config(
+    page_title="RAG Chat",
+    page_icon="💬",
+    layout="centered"
+)
+
+st.title("💬 Внутренняя справочная система (RAG через FastAPI)")
+st.markdown("---")
+
+# ----------- ИСТОРИЯ ----------- 
+if "history" not in st.session_state:
+    st.session_state.history = []
+
+# ----------- ОТОБРАЖЕНИЕ ЧАТА ----------
+for role, text in st.session_state.history:
+    if role == "user":
+        st.markdown(f"**Вы:** {text}")
+    else:
+        st.markdown(f"**ИИ:** {text}")
+
+st.markdown("---")
+
+# ----------- ФОРМА С ОЧИСТКОЙ ПОЛЯ ---------
+with st.form("chat_form", clear_on_submit=True):
+    question = st.text_input("Введите вопрос:")
+    submitted = st.form_submit_button("Отправить")
+
+if submitted and question.strip():
+    try:
+        logging.info(f"Session ID: {SESSION_ID} | Вопрос: {question}")
+        resp = requests.post(
+            API_URL,
+            json={"session_id": SESSION_ID, "question": question},
+            timeout=300
+        )
+        resp.raise_for_status()
+        answer = resp.json()["answer"]
+        logging.info(f"Session ID: {SESSION_ID} | Ответ: {answer}")
+    except Exception as e:
+        answer = f"Ошибка запроса: {e}"
+        logging.info(f"Session ID: {SESSION_ID} | Ответ: {answer}")
+
+    st.session_state.history.append(("user", question))
+    st.session_state.history.append(("assistant", answer))
+    st.rerun()
