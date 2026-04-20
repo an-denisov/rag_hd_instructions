@@ -8,8 +8,6 @@ __pycache__/
 # Virtual environments
 venv/
 env/
-chunks/
-sources/
 
 # Logs
 *.log
@@ -18,6 +16,8 @@ sources/
 chroma_db/
 *.sqlite3
 *.db
+chunks/*
+sources/*
 
 # Model files
 models/
